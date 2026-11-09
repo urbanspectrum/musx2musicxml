@@ -1,3 +1,7 @@
+> **Fork notice.** This is a fork of [musx2mxl](https://github.com/joris-vaneyghen/musx2mxl) by Joris Vaneyghen (MIT License, see LICENSE).
+> Changes in this fork: SMuFL articulations, dynamics and tempo glyphs (Finale 26+ fonts); exact tuplet durations;
+> playback tempo written as `<sound tempo>`; correct empty-measure rests; unknown markings reported instead of silently dropped.
+
 # Finale to MusicXML Converter
 
 [![GitHub](https://img.shields.io/github/stars/joris-vaneyghen/musx2mxl?style=social)](https://github.com/joris-vaneyghen/musx2mxl)

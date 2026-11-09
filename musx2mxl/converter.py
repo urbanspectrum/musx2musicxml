@@ -1,16 +1,19 @@
 import math
+from fractions import Fraction
 from datetime import date
 from io import BytesIO
 from lxml.etree import Element, SubElement, parse, ElementTree, XMLSyntaxError
 from musx2mxl.helper import calculate_mode_and_key_fifths, calculate_type_and_dots, calculate_step_alter_and_octave, \
     translate_clef_sign, translate_bar_style, replace_music_symbols, remove_styling_tags, translate_dynamics, \
-    count_tuplet, translate_articualtion, translate_tempo_marks, calculate_transpose, translate_instrument, \
+    count_tuplet, translate_articualtion, translate_tempo_marks, translate_articulation_glyph, clean_words, calculate_transpose, translate_instrument, \
     reorder_children, find_nth_syllabic, translate_chord_suffix, translate_chord_step
 import musx2mxl
 
 ns = {"f": "http://www.makemusic.com/2012/finale"}
 ns2 = {"m": "http://www.makemusic.com/2012/NotationMetadata"}
-DIVISIONS = 16  # nb devisions per quarter note
+# Divisions per quarter note. 6720 = 2^6 * 3 * 5 * 7, so triplets, quintuplets and septuplets down to
+# 128th notes get exact integer durations (upstream used 16, which cannot represent a triplet).
+DIVISIONS = 6720
 
 VERBOSE = False
 
@@ -74,6 +77,10 @@ def lookup_meas_expressions(root, meas_spec_cmper: str):
                                                                                     namespaces=ns) is not None else None
         descStr = textExprDef.find("f:descStr", namespaces=ns).text if textExprDef.find("f:descStr",
                                                                                         namespaces=ns) is not None else None
+        playType_ = textExprDef.find("f:playType", namespaces=ns)
+        playType = playType_.text if playType_ is not None else None
+        auxdata1_ = textExprDef.find("f:auxdata1", namespaces=ns)
+        auxdata1 = auxdata1_.text if auxdata1_ is not None else None
         textBlock = root.find(f"f:others/f:textBlock[@cmper='{textIDKey}']", namespaces=ns)
         expression_text = None
         if textBlock is not None:
@@ -99,10 +106,35 @@ def lookup_meas_expressions(root, meas_spec_cmper: str):
                 "textTag": textTag,
                 "showShape": showShape,
                 "descStr": descStr,
+                "playType": playType,
+                "auxdata1": auxdata1,
                 "text": expression_text,
             }
             expressions.append(expression)
     return expressions
+
+
+BEAT_UNIT_QUARTERS = {'whole': 4, 'half': 2, 'quarter': 1, 'eighth': 0.5, '16th': 0.25}
+
+
+def playback_tempo(expression, beat_unit, has_dot, per_minute):
+    """Playback tempo in quarter notes per minute, as MusicXML <sound tempo> wants it.
+
+    Finale keeps the playback tempo in the expression definition (playType=time, value = beats per
+    minute, auxdata1 = beat length in EDU, 1024 = quarter), separate from the visible text. Prefer that;
+    fall back to the number printed in the metronome mark.
+    """
+    if expression.get('playType') == 'time' and expression.get('value'):
+        try:
+            bpm = float(expression['value'])
+            beat_edu = float(expression['auxdata1']) if expression.get('auxdata1') else 1024.0
+            return f"{bpm * beat_edu / 1024:g}"
+        except ValueError:
+            pass
+    if beat_unit and per_minute and str(per_minute).isdigit():
+        quarters = BEAT_UNIT_QUARTERS.get(beat_unit, 1) * (1.5 if has_dot else 1)
+        return f"{int(per_minute) * quarters:g}"
+    return None
 
 
 def lookup_txt_repeats(root, meas_spec_cmper):
@@ -792,8 +824,12 @@ def lookup_artic_detail(root, entnum):
     for articAssign in articAssigns:
         articDef_cmper = articAssign.find("f:articDef", namespaces=ns).text
         articDef = root.xpath(f"/f:finale/f:others/f:articDef[@cmper = '{articDef_cmper}']", namespaces=ns)[0]
-        charMain = articDef.find("f:charMain", namespaces=ns).text
-        charAlt = articDef.find("f:charAlt", namespaces=ns).text
+        charMain_ = articDef.find("f:charMain", namespaces=ns)
+        charAlt_ = articDef.find("f:charAlt", namespaces=ns)
+        charMain = charMain_.text if charMain_ is not None else None
+        charAlt = charAlt_.text if charAlt_ is not None else None
+        if charMain is None:
+            print(f"Articulation {articDef_cmper} is drawn with a shape, not a font glyph; not converted yet")
         artic_details.append({'charMain': charMain, 'charAlt': charAlt})
 
     return artic_details
@@ -814,33 +850,24 @@ def lookup_lyric_details(root, entnum):
     return lyric_details
 
 
-def add_rest_to_empty_measure(root, measure, meas_spec_cmper, staff_id):
-    first_gfhold = root.find(f"f:details/f:gfhold[@cmper2 = '{meas_spec_cmper}'][f:frame1]", namespaces=ns)
-    if first_gfhold is not None:
-        frame = first_gfhold.find(f"f:frame1", namespaces=ns).text
-        frameSpec = root.find(f"f:others/f:frameSpec[@cmper = '{frame}'][f:startEntry][f:endEntry]", namespaces=ns)
-        start_entnum = frameSpec.find("f:startEntry", namespaces=ns).text
-        end_entnum = frameSpec.find("f:endEntry", namespaces=ns).text
-        current_entnum = None
-        next_entnum = start_entnum
-        dura = 0
-        while current_entnum != end_entnum:
-            entry = root.find(f"f:entries/f:entry[@entnum = '{next_entnum}']", namespaces=ns)
-            current_entnum = next_entnum
-            next_entnum = entry.get("next")
-            dura += int(entry.find("f:dura", namespaces=ns).text)
+def add_rest_to_empty_measure(root, measure, meas_spec_cmper, staff_id, beats=None, divbeat=None):
+    """An empty staff in Finale gets a whole-measure rest lasting the measure's time signature.
 
-        type_name, nb_dots = calculate_type_and_dots(dura)  # todo what if dura does not match type + dots
-        note = SubElement(measure, "note")
-        SubElement(note, "rest")
-        SubElement(note, "duration").text = str(math.ceil((dura * DIVISIONS) / 1024))
-        voice = (staff_id - 1) * 4 + 1 if staff_id is not None else 1
-        SubElement(note, "voice").text = str(voice)
-        SubElement(note, "type").text = type_name
-        for _ in range(nb_dots):
-            SubElement(note, "dot")
-        if staff_id:
-            SubElement(note, "staff").text = str(staff_id)
+    Upstream summed the notated values of whichever staff happened to come first, so an empty staff
+    under a staff with triplets (or in a different layer layout) got a rest of the wrong length.
+    """
+    if beats is None or divbeat is None:
+        meas_spec = root.find(f"f:others/f:measSpec[@cmper = '{meas_spec_cmper}']", namespaces=ns)
+        beats = meas_spec.find("f:beats", namespaces=ns).text
+        divbeat = meas_spec.find("f:divbeat", namespaces=ns).text
+    dura = int(beats) * int(divbeat)
+    note = SubElement(measure, "note")
+    SubElement(note, "rest", measure="yes")
+    SubElement(note, "duration").text = str((dura * DIVISIONS) // 1024)
+    voice = (staff_id - 1) * 4 + 1 if staff_id is not None else 1
+    SubElement(note, "voice").text = str(voice)
+    if staff_id:
+        SubElement(note, "staff").text = str(staff_id)
 
 
 def process_gfholds(staff_spec_cmper, meas_spec_cmper, staff_id, measure, root, meas_spec,
@@ -854,7 +881,7 @@ def process_gfholds(staff_spec_cmper, meas_spec_cmper, staff_id, measure, root, 
         first_clefID = root.find(f"f:details/f:gfhold[@cmper1 = '{staff_spec_cmper}']/f:clefID",
                                  namespaces=ns)
         clefID = first_clefID.text if first_clefID is not None else None
-        add_rest_to_empty_measure(root, measure, meas_spec_cmper, staff_id)
+        add_rest_to_empty_measure(root, measure, meas_spec_cmper, staff_id, current_beats, current_divbeat)
 
     hasExpr = meas_spec.find("f:hasExpr", namespaces=ns) is not None
     if hasExpr:
@@ -879,20 +906,30 @@ def process_gfholds(staff_spec_cmper, meas_spec_cmper, staff_id, measure, root, 
                     if staff_id:
                         SubElement(direction, "staff").text = str(staff_id)
                     words = SubElement(direction_type, 'words')
-                    words.text = remove_styling_tags(expression['text'])
+                    words.text = clean_words(expression['text'])
                     words.set('font-style', 'italic')
             if expression['categoryType'] == 'dynamics' and expression['staffAssign'] == staff_spec_cmper:
                 dynamic_name = translate_dynamics(expression['text'])
+                direction = SubElement(measure, "direction", placement=placement)
+                direction_type = SubElement(direction, "direction-type")
                 if dynamic_name is not None:
-                    direction = SubElement(measure, "direction", placement=placement)
-                    direction_type = SubElement(direction, "direction-type")
-                    if expression['horzEduOff']:
-                        SubElement(direction, "offset").text = str(
-                            math.ceil((int(expression['horzEduOff']) * DIVISIONS) / 1024))
-                    if staff_id:
-                        SubElement(direction, "staff").text = str(staff_id)
                     dynamics = SubElement(direction_type, "dynamics")
-                    SubElement(dynamics, dynamic_name)
+                    if isinstance(dynamic_name, tuple):
+                        SubElement(dynamics, dynamic_name[0]).text = dynamic_name[1]
+                    else:
+                        SubElement(dynamics, dynamic_name)
+                else:
+                    # never drop a marking silently: keep it visible as text and report it
+                    text = clean_words(expression['text'])
+                    print(f"Measure {meas_spec_cmper}: dynamic not recognised, kept as words: {text!r}")
+                    words = SubElement(direction_type, 'words')
+                    words.text = text
+                    words.set('font-style', 'italic')
+                if expression['horzEduOff']:
+                    SubElement(direction, "offset").text = str(
+                        math.ceil((int(expression['horzEduOff']) * DIVISIONS) / 1024))
+                if staff_id:
+                    SubElement(direction, "staff").text = str(staff_id)
             elif expression['categoryType'] == 'tempoAlts' and expression['staffAssign'] == staff_spec_cmper:
                 direction = SubElement(measure, "direction", placement=placement)
                 direction_type = SubElement(direction, "direction-type")
@@ -902,7 +939,7 @@ def process_gfholds(staff_spec_cmper, meas_spec_cmper, staff_id, measure, root, 
                 if staff_id:
                     SubElement(direction, "staff").text = str(staff_id)
                 words = SubElement(direction_type, 'words')
-                words.text = remove_styling_tags(expression['text'])
+                words.text = clean_words(expression['text'])
                 words.set('font-style', 'italic')
             elif expression['categoryType'] == 'expressiveText' and expression['staffAssign'] == staff_spec_cmper:
                 direction = SubElement(measure, "direction", placement=placement)
@@ -913,7 +950,7 @@ def process_gfholds(staff_spec_cmper, meas_spec_cmper, staff_id, measure, root, 
                 if staff_id:
                     SubElement(direction, "staff").text = str(staff_id)
                 words = SubElement(direction_type, 'words')
-                words.text = remove_styling_tags(expression['text'])
+                words.text = clean_words(expression['text'])
                 words.set('font-style', 'italic')
             elif expression['categoryType'] == 'techniqueText' and expression['staffAssign'] == staff_spec_cmper:
                 direction = SubElement(measure, "direction", placement=placement)
@@ -924,32 +961,44 @@ def process_gfholds(staff_spec_cmper, meas_spec_cmper, staff_id, measure, root, 
                 if staff_id:
                     SubElement(direction, "staff").text = str(staff_id)
                 words = SubElement(direction_type, 'words')
-                words.text = remove_styling_tags(expression['text'])
+                words.text = clean_words(expression['text'])
                 words.set('font-style', 'italic')
             elif expression['categoryType'] == 'tempoMarks':
                 words, beat_unit, has_dot, per_minute, parentheses = translate_tempo_marks(expression['text'])
-                direction = SubElement(measure, "direction", placement=placement)
+                # MusicXML order inside <direction>: direction-type+, offset?, staff?, sound?
+                direction = Element("direction", placement=placement)
                 if words:
                     direction_type = SubElement(direction, "direction-type")
-                    if expression['horzEduOff']:
-                        SubElement(direction, "offset").text = str(
-                            math.ceil((int(expression['horzEduOff']) * DIVISIONS) / 1024))
                     SubElement(direction_type, "words").text = words
                 if beat_unit and per_minute:
                     direction_type = SubElement(direction, "direction-type")
-                    if expression['horzEduOff']:
-                        SubElement(direction, "offset").text = str(
-                            math.ceil((int(expression['horzEduOff']) * DIVISIONS) / 1024))
                     metronome = SubElement(direction_type, "metronome", parentheses=parentheses)
                     SubElement(metronome, "beat-unit").text = beat_unit
                     if has_dot:
                         SubElement(metronome, "beat-unit-dot")
                     SubElement(metronome, "per-minute").text = per_minute
+                if expression['horzEduOff']:
+                    SubElement(direction, "offset").text = str(
+                        math.ceil((int(expression['horzEduOff']) * DIVISIONS) / 1024))
+                tempo = playback_tempo(expression, beat_unit, has_dot, per_minute)
+                if len(direction):
+                    measure.append(direction)
+                    if tempo:
+                        SubElement(direction, "sound", tempo=tempo)
+                elif tempo:
+                    SubElement(measure, "sound", tempo=tempo)
             elif expression['categoryType'] == 'rehearsalMarks':
                 # if not '^rehearsal()' in expression['text'] and not 'Rehearsal' in expression['descStr']:
                 #     print(meas_spec_cmper, 'rehearsalMarks', expression)
                 # todo rehearsal letters
                 pass
+
+            # Tempo changes carried by any other category (e.g. "a Tempo", "Andantino" filed elsewhere)
+            if (expression['categoryType'] != 'tempoMarks' and expression['playType'] == 'time'
+                    and expression['staffAssign'] == staff_spec_cmper):
+                tempo = playback_tempo(expression, None, False, None)
+                if tempo:
+                    SubElement(measure, "sound", tempo=tempo)
 
     for gfhold in gfholds:
         if gfhold.find("f:clefID", namespaces=ns) is not None:
@@ -996,44 +1045,147 @@ def process_gfholds(staff_spec_cmper, meas_spec_cmper, staff_id, measure, root, 
     return clefID, handle_tempo
 
 
+NOTE_ORDER = ["grace", "chord", "pitch", "unpitched", "rest", "cue", "duration", "tie", "instrument",
+              "footnote", "level", "voice", "type", "dot", "accidental", "time-modification", "stem",
+              "notehead", "notehead-text", "staff", "beam", "notations", "lyric", "play", "listen"]
+
+
+def advance_tuplets(root, entry, dura, is_grace, tuplet_attributes):
+    """Update the running tuplet state for one entry.
+
+    Returns (started, ratio, stopped, nested_normal_type):
+      started  - list of tuplet attribute dicts that start on this entry
+      ratio    - (actual_notes, normal_notes) for the entry, or None outside a tuplet
+      stopped  - tuplet numbers that end on this entry
+    Grace notes take no time, so they neither advance nor close a tuplet.
+    """
+    started = []
+    if entry.find("f:tupletStart", namespaces=ns) is not None:
+        entnum = entry.get("entnum")
+        idx = max([int(t['number']) for t in tuplet_attributes], default=0)
+        for tupletDef in root.xpath(f"/f:finale/f:details/f:tupletDef[@entnum = '{entnum}'][f:symbolicNum]",
+                                    namespaces=ns):
+            idx += 1
+            attrs = {
+                'symbolicNum': tupletDef.find("f:symbolicNum", namespaces=ns).text,
+                'symbolicDur': tupletDef.find("f:symbolicDur", namespaces=ns).text,
+                'refNum': tupletDef.find("f:refNum", namespaces=ns).text,
+                'refDur': tupletDef.find("f:refDur", namespaces=ns).text,
+                'count': 0,
+                'number': str(idx),
+            }
+            tuplet_attributes.append(attrs)
+            started.append(attrs)
+    if not tuplet_attributes or is_grace:
+        return started, None, [], None
+    is_nested = len(tuplet_attributes) > 1
+    nested_normal_type = None
+    if is_nested:
+        nested_normal_type, _ = calculate_type_and_dots(int(tuplet_attributes[0]['symbolicDur']))
+    count_tuplet(tuplet_attributes, dura)
+    actual_notes, normal_notes = 1, 1
+    stopped = []
+    for attrs in list(tuplet_attributes):  # copy: we remove while iterating
+        actual_notes *= int(attrs['symbolicNum'])
+        normal_notes *= int(attrs['refNum'])
+        if attrs['count'] >= int(attrs['symbolicNum']) - 1e-9:
+            stopped.append(attrs['number'])
+            tuplet_attributes.remove(attrs)
+    return started, (actual_notes, normal_notes), stopped, nested_normal_type
+
+
+def sounding_duration(dura, ratio):
+    """Finale stores the NOTATED value of a tuplet note; MusicXML <duration> is the real time it takes."""
+    value = Fraction(dura * DIVISIONS, 1024)
+    if ratio:
+        value = value * ratio[1] / ratio[0]
+    if value.denominator != 1:
+        print(f"Warning: duration {dura} EDU with tuplet {ratio} is not exact at {DIVISIONS} divisions; rounded")
+    return str(round(value))
+
+
+def add_tuplet_notations(notations, started, stopped):
+    for attrs in started:
+        tuplet = SubElement(notations, 'tuplet', number=attrs['number'], type='start')
+        if int(attrs['number']) > 1:
+            actual_type, _ = calculate_type_and_dots(int(attrs['symbolicDur']))
+            normal_type, _ = calculate_type_and_dots(int(attrs['refDur']))
+            tuplet_actual = SubElement(tuplet, 'tuplet-actual')
+            SubElement(tuplet_actual, 'tuplet-number').text = attrs['symbolicNum']
+            SubElement(tuplet_actual, 'tuplet-type').text = actual_type
+            tuplet_normal = SubElement(tuplet, 'tuplet-normal')
+            SubElement(tuplet_normal, 'tuplet-number').text = attrs['refNum']
+            SubElement(tuplet_normal, 'tuplet-type').text = normal_type
+    for number in stopped:
+        SubElement(notations, 'tuplet', number=number, type='stop')
+
+
+def add_time_modification(note, ratio, nested_normal_type):
+    if ratio:
+        tm = SubElement(note, "time-modification")
+        SubElement(tm, "actual-notes").text = str(ratio[0])
+        SubElement(tm, "normal-notes").text = str(ratio[1])
+        if nested_normal_type:
+            SubElement(tm, "normal-type").text = nested_normal_type
+
+
+def add_articulations(notations, artic_details):
+    groups = {}
+    for art_detail in artic_details:
+        for group, tag, attrs in translate_articulation_glyph(art_detail['charMain']):
+            if group == 'notations':
+                parent = notations
+            else:
+                if group not in groups:
+                    groups[group] = SubElement(notations, group)
+                parent = groups[group]
+            el = SubElement(parent, tag)
+            for k, v in attrs.items():
+                if k == '_text':
+                    el.text = v
+                elif v is not None:
+                    el.set(k, v)
+
+
 def process_entry(root, measure, entry, staff_id, voice, key, transp_key_adjust, transp_interval, tuplet_attributes):
     dura = int(entry.find("f:dura", namespaces=ns).text)
     is_note = entry.find("f:isNote", namespaces=ns) is not None
     noteDetail = entry.find("f:noteDetail", namespaces=ns) is not None
     lyricDetail = entry.find("f:lyricDetail", namespaces=ns) is not None
     articDetail = entry.find("f:articDetail", namespaces=ns) is not None
-    if noteDetail:
-        note_alter_map = lookup_note_alter(root, entry.get("entnum"))
-        if VERBOSE: print(f'note_alter_map = {note_alter_map}')
-    else:
-        note_alter_map = {}
-
-    if articDetail:
-        artic_details = lookup_artic_detail(root, entry.get("entnum"))
-        if VERBOSE: print(f'artic_detail_map = {artic_details}')
-    else:
-        artic_details = []
-
-    # what is beam for?
-    beam = entry.find("f:beam", namespaces=ns) is not None
+    note_alter_map = lookup_note_alter(root, entry.get("entnum")) if noteDetail else {}
+    artic_details = lookup_artic_detail(root, entry.get("entnum")) if articDetail else []
     graceNote = entry.find("f:graceNote", namespaces=ns) is not None
-    tupletStart = entry.find("f:tupletStart", namespaces=ns) is not None
-
     smartShapeDetail = entry.find("f:smartShapeDetail", namespaces=ns) is not None
+
+    started, ratio, stopped, nested_normal_type = advance_tuplets(root, entry, dura, graceNote, tuplet_attributes)
+    duration_text = sounding_duration(dura, ratio)
+    type_name, nb_dots = calculate_type_and_dots(dura)  # notated value, unchanged by the tuplet
+
+    def finish(note, idx):
+        # first note of the entry carries the entry-level notations
+        if idx == 0:
+            notations = SubElement(note, "notations")
+            if smartShapeDetail:
+                handleSmartShapeDetail(root, entry, notations)
+            add_tuplet_notations(notations, started, stopped)
+            if artic_details:
+                add_articulations(notations, artic_details)
+            if len(notations) == 0:
+                note.remove(notations)
+        reorder_children(note, NOTE_ORDER)
+
     if is_note:
-        # numNotes = int(entry.find("f:numNotes", namespaces=ns).text)
         notes = entry.xpath("f:note", namespaces=ns)
         for idx, note_ in enumerate(notes):
             note = SubElement(measure, "note")
-            if idx == 0:
-                if lyricDetail:
-                    lyric_details = lookup_lyric_details(root, entry.get("entnum"))
-                    for lyric_detail in lyric_details:
-                        lyric = SubElement(note, "lyric", name="verse", number=lyric_detail["number"])
-                        SubElement(lyric, "syllabic").text = lyric_detail["syllabic"]
-                        SubElement(lyric, "text").text = lyric_detail["text"]
-                        if lyric_detail["extend"]:
-                            SubElement(lyric, "extend")
+            if idx == 0 and lyricDetail:
+                for lyric_detail in lookup_lyric_details(root, entry.get("entnum")):
+                    lyric = SubElement(note, "lyric", name="verse", number=lyric_detail["number"])
+                    SubElement(lyric, "syllabic").text = lyric_detail["syllabic"]
+                    SubElement(lyric, "text").text = lyric_detail["text"]
+                    if lyric_detail["extend"]:
+                        SubElement(lyric, "extend")
             if idx > 0:
                 SubElement(note, "chord")
             if graceNote:
@@ -1047,132 +1199,36 @@ def process_entry(root, measure, entry, staff_id, voice, key, transp_key_adjust,
             step_value, alter_value, octave_value = calculate_step_alter_and_octave(harm_lev, harm_alt, key,
                                                                                     transp_key_adjust, transp_interval,
                                                                                     enharmonic)
-            step = SubElement(pitch, "step")
-            step.text = step_value
+            SubElement(pitch, "step").text = step_value
             if alter_value != 0:
-                alter = SubElement(pitch, "alter")
-                alter.text = str(alter_value)
-            octave = SubElement(pitch, "octave")
-            octave.text = str(octave_value)
+                SubElement(pitch, "alter").text = str(alter_value)
+            SubElement(pitch, "octave").text = str(octave_value)
             if not graceNote:
-                duration = SubElement(note, "duration")
-                duration.text = str((dura * DIVISIONS) // 1024)
-
-            tie_start = note_.find("f:tieStart", namespaces=ns)
-            tie_end = note_.find("f:tieEnd", namespaces=ns)
-
-            if tie_start is not None:
+                SubElement(note, "duration").text = duration_text
+            if note_.find("f:tieStart", namespaces=ns) is not None:
                 SubElement(note, "tie", type='start')
-            if tie_end is not None:
+            if note_.find("f:tieEnd", namespaces=ns) is not None:
                 SubElement(note, "tie", type='stop')
-
-            voice_elem = SubElement(note, "voice")
-            voice_elem.text = str(voice)
-            type_name, nb_dots = calculate_type_and_dots(dura)
+            SubElement(note, "voice").text = str(voice)
             if type_name:  # type_name can be None if the dura is not supported
-                type_elem = SubElement(note, "type")
-                type_elem.text = type_name
+                SubElement(note, "type").text = type_name
                 for _ in range(nb_dots):
                     SubElement(note, "dot")
-
+            add_time_modification(note, ratio, nested_normal_type)  # every chord member, not just the first
             if staff_id:
                 SubElement(note, "staff").text = str(staff_id)
-
-            if idx == 0:
-                notations = SubElement(note, "notations")
-                if smartShapeDetail:
-                    handleSmartShapeDetail(root, entry, notations)
-                if tupletStart:
-                    handleTupletStart(root, entry, notations, tuplet_attributes)
-                if len(tuplet_attributes) > 0:
-                    # todo handle symbolicDur != refDur
-                    is_nested = len(tuplet_attributes) > 1
-                    count_tuplet(tuplet_attributes, dura)
-                    if VERBOSE: print(tuplet_attributes)
-                    actual_notes = 1
-                    normal_notes = 1
-                    for attributes in tuplet_attributes:
-                        actual_notes *= int(attributes['symbolicNum'])
-                        normal_notes *= int(attributes['refNum'])
-                        if attributes['count'] == int(attributes['symbolicNum']):
-                            SubElement(notations, 'tuplet', number=attributes['number'], type='stop')
-                            tuplet_attributes.remove(attributes)
-                    time_modification = SubElement(note, "time-modification")
-                    SubElement(time_modification, "actual-notes").text = str(actual_notes)
-                    SubElement(time_modification, "normal-notes").text = str(normal_notes)
-                    if is_nested:
-                        normal_type, _ = calculate_type_and_dots(int(tuplet_attributes[0]['symbolicDur']))
-                        SubElement(time_modification, "normal-type").text = normal_type
-
-                if articDetail:
-                    articulations = SubElement(notations, "articulations")
-                    for art_detail in artic_details:
-                        tag_name, type = translate_articualtion(art_detail['charMain'])
-                        articulation = SubElement(articulations, tag_name)
-                        if type:
-                            articulation.set('type', type)
-
-                # Remove empty notations element
-                if len(notations.getchildren()) == 0:
-                    note.remove(notations)
-
-            reorder_children(note,
-                             ["grace", "chord", "pitch", "unpitched", "rest", "cue", "duration", "tie", "instrument",
-                              "footnote", "level", "voice", "type", "dot", "accidental", "time-modification", "stem",
-                              "notehead", "notehead-text", "staff", "beam", "notations", "lyric", "play", "listen"
-                              ]
-                             )
-
-
-
+            finish(note, idx)
     else:
         note = SubElement(measure, "note")
         SubElement(note, "rest")
-        duration = SubElement(note, "duration")
-        duration.text = str((dura * DIVISIONS) // 1024)
-        voice_elem = SubElement(note, "voice")
-        voice_elem.text = str(voice)
-        type_name, nb_dots = calculate_type_and_dots(dura)
-        if type_name:  # type_name can be None if the dura is not supported
-            type_elem = SubElement(note, "type")
-            type_elem.text = type_name
+        SubElement(note, "duration").text = duration_text
+        SubElement(note, "voice").text = str(voice)
+        if type_name:
+            SubElement(note, "type").text = type_name
             for _ in range(nb_dots):
                 SubElement(note, "dot")
-            if staff_id:
-                SubElement(note, "staff").text = str(staff_id)
-        notations = SubElement(note, "notations")
-        if smartShapeDetail:
-            handleSmartShapeDetail(root, entry, notations)
-        if tupletStart:
-            handleTupletStart(root, entry, notations, tuplet_attributes)
-        if len(tuplet_attributes) > 0:
-            # todo handle symbolicDur != refDur
-            is_nested = len(tuplet_attributes) > 1
-            count_tuplet(tuplet_attributes, dura)
-            if VERBOSE: print(tuplet_attributes)
-            actual_notes = 1
-            normal_notes = 1
-            for attributes in tuplet_attributes:
-                actual_notes *= int(attributes['symbolicNum'])
-                normal_notes *= int(attributes['refNum'])
-                if attributes['count'] == int(attributes['symbolicNum']):
-                    SubElement(notations, 'tuplet', number=attributes['number'], type='stop')
-                    tuplet_attributes.remove(attributes)
-            time_modification = SubElement(note, "time-modification")
-            SubElement(time_modification, "actual-notes").text = str(actual_notes)
-            SubElement(time_modification, "normal-notes").text = str(normal_notes)
-            if is_nested:
-                normal_type, _ = calculate_type_and_dots(int(tuplet_attributes[0]['symbolicDur']))
-                SubElement(time_modification, "normal-type").text = normal_type
-
-        # Remove empty notations element
-        if len(notations.getchildren()) == 0:
-            note.remove(notations)
-
-        reorder_children(note,
-                         ["grace", "chord", "pitch", "unpitched", "rest", "cue", "duration", "tie", "instrument",
-                          "footnote", "level", "voice", "type", "dot", "accidental", "time-modification", "stem",
-                          "notehead", "notehead-text", "staff", "beam", "notations", "lyric", "play", "listen"
-                          ]
-                         )
+        add_time_modification(note, ratio, nested_normal_type)
+        if staff_id:
+            SubElement(note, "staff").text = str(staff_id)
+        finish(note, 0)
     return tuplet_attributes

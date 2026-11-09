@@ -27,6 +27,7 @@ ENGRAVER_CHAR_MAP_NOTE_TYPE = {
     'e': 'eighth',
     'q': 'quarter',
     'h': 'half',
+    'w': 'whole',
 }
 
 ENGRAVER_CHAR_MAP_ARTICUALTIONS = {
@@ -378,11 +379,23 @@ def calculate_step_alter_and_octave(harm_lev: int, harm_alt: int, key: int, tran
 
 
 def translate_tempo_marks(text: str):
-    # todo translate dots, ties
+    # todo translate ties
     text_without_tags = remove_styling_tags(text)
+    text_without_tags = re.sub(r"\^\w+\([^)]*\)", "", text_without_tags)
+    # SMuFL metronome glyphs -> Maestro letters, drop private-use/control characters
+    parsed = []
+    for ch in text_without_tags:
+        cp = ord(ch)
+        if cp in SMUFL_TEMPO_NOTES:
+            parsed.append(SMUFL_TEMPO_NOTES[cp][0])
+        elif 0xE000 <= cp <= 0xF8FF or cp < 0x20 or 0x7F <= cp <= 0x9F:
+            continue
+        else:
+            parsed.append(ch)
+    parse_text = re.sub(r"\s+", " ", ''.join(parsed)).strip()
 
-    pattern = re.compile(r"(.*?\s+)?([({]\s*)?(m\s+)?([xeqh])([d|.])?\s*=\s*(c[a.]{0,2}\s+)?(\d+)(\s*[)}])?(\s+.*)?")
-    match = pattern.match(text_without_tags)
+    pattern = re.compile(r"(.*?\s+)?([({]\s*)?(m\s+)?([xeqhw])([d|.])?\s*=\s*(c[a.]{0,2}\s+)?(\d+)(\s*[)}])?(\s+.*)?$")
+    match = pattern.match(parse_text)
 
     if match:
         prefix = match.group(1).strip() if match.group(1) else None
@@ -395,11 +408,9 @@ def translate_tempo_marks(text: str):
         has_bracket_closed = match.group(8) is not None
         postfix = match.group(9).strip() if match.group(9) else None
 
-        words = prefix
-        if postfix:
-            words = words + ' ' + postfix
+        words = ' '.join(w for w in (prefix, postfix) if w) or None
         if has_mm:
-            words += ' M. M.'
+            words = (words + ' ' if words else '') + 'M. M.'
         beat_unit = ENGRAVER_CHAR_MAP_NOTE_TYPE[note]
         if has_ca:
             per_minute = 'c. ' + per_minute
@@ -407,9 +418,10 @@ def translate_tempo_marks(text: str):
         return words, beat_unit, has_dot, per_minute, parentheses
 
     else:
-        if '=' in text_without_tags:
-            print('Could not parse tempo markings : {}'.format(text))
-        return text_without_tags, None, False, None, None
+        words = clean_words(text)
+        if '=' in words and not re.search(r"=\s*\D", words):
+            warn_once(('tempo', words), 'Could not parse tempo marking, kept as words: {}'.format(words))
+        return words, None, False, None, None
 
 
 def calculate_type_and_dots(dura: int) -> tuple[str, int]:
@@ -494,19 +506,124 @@ def replace_music_symbols(text):
     return text
 
 
+# --- SMuFL support (Finale 26+ default music fonts: Finale Maestro, Finale Broadway, Bravura, ...) ---
+# SMuFL dynamics glyphs -> the letters they stand for. Combined glyphs (e.g. U+E52D "mf") and
+# sequences of single-letter glyphs (U+E521 U+E522 = "m" "f") both resolve to a MusicXML name.
+SMUFL_DYNAMIC_LETTERS = {
+    0xE520: 'p', 0xE521: 'm', 0xE522: 'f', 0xE523: 'r', 0xE524: 's', 0xE525: 'z', 0xE526: 'n',
+    0xE527: 'pppppp', 0xE528: 'ppppp', 0xE529: 'pppp', 0xE52A: 'ppp', 0xE52B: 'pp', 0xE52C: 'mp',
+    0xE52D: 'mf', 0xE52E: 'pf', 0xE52F: 'ff', 0xE530: 'fff', 0xE531: 'ffff', 0xE532: 'fffff',
+    0xE533: 'ffffff', 0xE534: 'fp', 0xE535: 'fz', 0xE536: 'sf', 0xE537: 'sfp', 0xE538: 'sfpp',
+    0xE539: 'sfz', 0xE53A: 'sfzp', 0xE53B: 'sffz', 0xE53C: 'rf', 0xE53D: 'rfz',
+}
+MUSICXML_DYNAMICS = {'p', 'pp', 'ppp', 'pppp', 'ppppp', 'pppppp', 'f', 'ff', 'fff', 'ffff', 'fffff',
+                     'ffffff', 'mp', 'mf', 'sf', 'sfp', 'sfpp', 'fp', 'rf', 'rfz', 'sfz', 'sffz', 'fz',
+                     'n', 'pf', 'sfzp'}
+
+# SMuFL articulation glyphs -> list of (notations group, element, attributes).
+# Above/below variants map to the same element with a placement.
+def _art(tag, placement, group='articulations', **attrs):
+    a = dict(attrs)
+    if placement:
+        a['placement'] = placement
+    return (group, tag, a)
+
+
+SMUFL_ARTICULATIONS = {}
+for _cp, _tags in [
+    (0xE4A0, ['accent']), (0xE4A2, ['staccato']), (0xE4A4, ['tenuto']), (0xE4A6, ['staccatissimo']),
+    (0xE4A8, ['staccatissimo']),  # wedge
+    (0xE4AA, ['staccatissimo']),  # stroke
+    (0xE4AC, ['strong-accent']), (0xE4AE, ['strong-accent', 'staccato']), (0xE4B0, ['accent', 'staccato']),
+    (0xE4B2, ['detached-legato']), (0xE4B4, ['accent', 'tenuto']), (0xE4B6, ['stress']),
+    (0xE4B8, ['unstress']), (0xE4BC, ['strong-accent', 'tenuto']),
+]:
+    SMUFL_ARTICULATIONS[_cp] = [_art(t, 'above', **({'type': 'up'} if t == 'strong-accent' else {})) for t in _tags]
+    SMUFL_ARTICULATIONS[_cp + 1] = [_art(t, 'below', **({'type': 'down'} if t == 'strong-accent' else {})) for t in _tags]
+SMUFL_ARTICULATIONS.update({
+    0xE4CE: [_art('breath-mark', None)], 0xE4CF: [_art('breath-mark', None)],
+    0xE4D1: [_art('caesura', None)],
+    0xE4C0: [_art('fermata', None, group='notations', type='upright')],
+    0xE4C1: [_art('fermata', None, group='notations', type='inverted')],
+})
+for _n in range(1, 6):  # tremolo1..tremolo5 (U+E220..E224): measured tremolo strokes
+    SMUFL_ARTICULATIONS[0xE21F + _n] = [('ornaments', 'tremolo', {'type': 'single', '_text': str(_n)})]
+
+# SMuFL metronome-mark note glyphs -> the Maestro letters translate_tempo_marks understands,
+# and the plain Unicode character to show when the glyph ends up in words.
+SMUFL_TEMPO_NOTES = {
+    0xECA2: ('w', '\U0001D15D'), 0xECA3: ('h', '\U0001D15E'), 0xECA4: ('h', '\U0001D15E'),
+    0xECA5: ('q', '♩'), 0xECA6: ('q', '♩'), 0xECA7: ('e', '♪'), 0xECA8: ('e', '♪'),
+    0xECA9: ('x', '♬'), 0xECAA: ('x', '♬'), 0xECB7: ('.', '.'),
+}
+
+_unmapped_warned = set()
+
+
+def warn_once(key, message):
+    if key not in _unmapped_warned:
+        _unmapped_warned.add(key)
+        print(message)
+
+
 def translate_dynamics(text):
     text = remove_styling_tags(text)
+    text = re.sub(r"\^\w+\([^)]*\)", "", text).strip()
     if len(text) == 1 and ord(text) in ENGRAVER_CHAR_MAP_DYNAMICS:
         return ENGRAVER_CHAR_MAP_DYNAMICS[ord(text)]
-    else:
-        return None
+    if text and all(ord(ch) in SMUFL_DYNAMIC_LETTERS for ch in text):
+        name = ''.join(SMUFL_DYNAMIC_LETTERS[ord(ch)] for ch in text)
+        if name in MUSICXML_DYNAMICS:
+            return name
+        warn_once(('dyn', name), f"Dynamic '{name}' has no MusicXML element; written as other-dynamics")
+        return ('other-dynamics', name)
+    return None
+
+
+def translate_articulation_glyph(charMain):
+    """Return a list of (group, element, attributes) for a Finale articulation character.
+
+    group is 'articulations', 'ornaments' or 'notations' (element placed directly in <notations>).
+    Never returns an empty list for a real glyph: unknown glyphs become other-articulation and are reported.
+    """
+    if charMain is None:
+        return []
+    code = int(charMain)
+    if code in SMUFL_ARTICULATIONS:
+        return SMUFL_ARTICULATIONS[code]
+    if code in ENGRAVER_CHAR_MAP_ARTICUALTIONS:
+        tag, type_ = ENGRAVER_CHAR_MAP_ARTICUALTIONS[code]
+        return [('articulations', tag, {'type': type_} if type_ else {})]
+    warn_once(('art', code), f"Unmapped articulation glyph U+{code:04X}; written as other-articulation")
+    return [('articulations', 'other-articulation', {'_text': f"U+{code:04X}"})]
 
 
 def translate_articualtion(charMain: str):
-    if int(charMain) in ENGRAVER_CHAR_MAP_ARTICUALTIONS:
-        return ENGRAVER_CHAR_MAP_ARTICUALTIONS[int(charMain)]
-    else:
-        return 'other-articulation', None
+    # kept for backward compatibility with upstream callers
+    items = translate_articulation_glyph(charMain)
+    if items and items[0][0] == 'articulations':
+        return items[0][1], items[0][2].get('type')
+    return 'other-articulation', None
+
+
+def clean_words(text):
+    """Visible text for <words>: drop Finale insert commands, map SMuFL note glyphs to Unicode,
+    and strip private-use and control characters that no other program can display."""
+    text = remove_styling_tags(text)
+    text = replace_music_symbols(text)
+    text = re.sub(r"\^\w+\([^)]*\)", "", text)
+    out = []
+    for ch in text:
+        cp = ord(ch)
+        if cp in SMUFL_TEMPO_NOTES:
+            out.append(SMUFL_TEMPO_NOTES[cp][1])
+        elif cp in SMUFL_DYNAMIC_LETTERS and len(SMUFL_DYNAMIC_LETTERS[cp]) == 1:
+            out.append(SMUFL_DYNAMIC_LETTERS[cp])
+        elif 0xE000 <= cp <= 0xF8FF or cp < 0x20 or 0x7F <= cp <= 0x9F:
+            continue
+        else:
+            out.append(ch)
+    return re.sub(r"\s+", " ", ''.join(out)).strip()
 
 
 def translate_chord_step(key, transp_key_adjust, rootScaleNum, rootAlter):
