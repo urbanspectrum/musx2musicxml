@@ -17,7 +17,7 @@ requirements_path = this_directory / "requirements.txt"
 install_requires = requirements_path.read_text().splitlines() if requirements_path.exists() else []
 
 setup(
-    name="musx2mxl",  # Package name
+    name="musx2musicxml",  # Distribution name of this fork (the import package stays musx2mxl)
     version=version,  # Dynamically read version
     long_description=long_description,
     long_description_content_type='text/markdown',

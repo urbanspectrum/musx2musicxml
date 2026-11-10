@@ -59,6 +59,49 @@ def lookup_note_alter(root, entnum: str):
     return noteAlter_map
 
 
+_REHEARSAL_CACHE = {}
+
+
+def _sequence_letter(index):
+    # Finale order: A..Z, then AA, BB .. ZZ, then AAA ...
+    return chr(ord('A') + index % 26) * (index // 26 + 1)
+
+
+def rehearsal_label(root, meas_spec_cmper, expression):
+    """Label for an auto-sequencing rehearsal mark (^rehearsal()), counted in score order per style.
+    Returns (label, enclosure). Plain-text rehearsal marks keep their own text."""
+    style = expression.get('rehearsalMarkStyle')
+    text = expression.get('text') or ''
+    if '^rehearsal()' not in text:
+        words = clean_words(text)
+        return (words, 'rectangle') if words else (None, None)
+    if style == 'measNum':
+        return meas_spec_cmper, None
+    key = id(root)
+    if key not in _REHEARSAL_CACHE:
+        labels = {}
+        counters = {}
+        assigns = root.xpath("/f:finale/f:others/f:measExprAssign[f:textExprID][not(@part)]", namespaces=ns)
+        seen = set()
+        for a in sorted(assigns, key=lambda a: (int(a.get('cmper')), int(a.findtext('f:horzEduOff', '0', namespaces=ns) or 0))):
+            expr_id = a.findtext('f:textExprID', namespaces=ns)
+            d = root.find(f"f:others/f:textExprDef[@cmper='{expr_id}']", namespaces=ns)
+            st = d.findtext('f:rehearsalMarkStyle', namespaces=ns) if d is not None else None
+            if st not in ('letters', 'numbers'):
+                continue
+            meas = a.get('cmper')
+            if (meas, expr_id) in seen:  # same mark assigned to several staves counts once
+                continue
+            seen.add((meas, expr_id))
+            n = counters.get(st, 0)
+            counters[st] = n + 1
+            labels[(meas, expr_id)] = _sequence_letter(n) if st == 'letters' else str(n + 1)
+        _REHEARSAL_CACHE.clear()
+        _REHEARSAL_CACHE[key] = labels
+    label = _REHEARSAL_CACHE[key].get((meas_spec_cmper, expression.get('textExprID')))
+    return label, ('circle' if style == 'numbers' else 'rectangle')
+
+
 def lookup_meas_expressions(root, meas_spec_cmper: str):
     expressions = []
     measExprAssigns = root.xpath(f"/f:finale/f:others/f:measExprAssign[@cmper='{meas_spec_cmper}'][f:textExprID]",
@@ -109,6 +152,8 @@ def lookup_meas_expressions(root, meas_spec_cmper: str):
                 "playType": playType,
                 "auxdata1": auxdata1,
                 "text": expression_text,
+                "textExprID": textExprID,
+                "rehearsalMarkStyle": textExprDef.findtext("f:rehearsalMarkStyle", namespaces=ns),
             }
             expressions.append(expression)
     return expressions
@@ -223,7 +268,26 @@ def lookup_suffix(root, suffix_cmper):
             else:
                 suffix_str += str(suffix)
 
-    return suffix_str
+    return suffix_str.translate(SMUFL_CHORD_SYMBOLS)
+
+
+# SMuFL chord-symbol glyphs (Finale 26+ fonts) as the plain text the chord patterns understand
+SMUFL_CHORD_SYMBOLS = str.maketrans({
+    "": "°",  # csymDiminished
+    "": "ø",  # csymHalfDiminished
+    "": "+",  # csymAugmented
+    "": "Δ",  # csymMajorSeventh
+    "": "-",  # csymMinor
+    "": "(", "": ")",  # csymParensLeftTall / RightTall
+    "": "[", "": "]",  # csymBracketLeftTall / RightTall
+    "": "(", "": ")",  # csymParensLeftVeryTall / RightVeryTall
+    "": "(", "": ")",  # csymBracketLeftVeryTall / RightVeryTall (approximated)
+    "": "b",  # accidentalFlat
+    "": "",   # accidentalNatural
+    "": "#",  # accidentalSharp
+    "": "##",  # accidentalDoubleSharp
+    "": "bb",  # accidentalDoubleFlat
+})
 
 
 def lookup_chords(root, staff_spec_cmper, meas_spec_cmper):
@@ -371,7 +435,7 @@ def convert_tree(tree, meta_tree):
             current_beats = None
             current_divbeat = None
             current_clefID = None
-            ending_cnt = 0  # todo how to find ending numbers correctly
+            endings = lookup_endings(root)
 
             meas_specs = root.xpath("/f:finale/f:others/f:measSpec[not(@shared) and not(@part)]", namespaces=ns)
             nb_measures = len(meas_specs)
@@ -482,7 +546,7 @@ def convert_tree(tree, meta_tree):
                         pass
                     else:
                         if meas_smart_shape['startEntry'] is None:
-                            print(meas_smart_shape)
+                            if VERBOSE: print(meas_smart_shape)
 
                 leftBarline = meas_spec.find("f:leftBarline", namespaces=ns).text
                 if key_ is None:
@@ -503,11 +567,13 @@ def convert_tree(tree, meta_tree):
                     current_beats = beats
                     current_divbeat = divbeat
 
-                if forRepBar or barEnding:
+                ending_start = endings['start'].get(meas_spec_cmper)
+                ending_stop = endings['stop'].get(meas_spec_cmper)
+                if forRepBar or ending_start:
                     left_barline = SubElement(measure, "barline", location='left')
-                    if barEnding:
-                        ending_cnt += 1
-                        SubElement(left_barline, "ending", number=str(ending_cnt), type='start').text = f'{ending_cnt}.'
+                    if ending_start:
+                        SubElement(left_barline, "ending", number=ending_start,
+                                   type='start').text = ending_start.replace(',', '.,') + '.'
                     if forRepBar:
                         SubElement(left_barline, "bar-style").text = 'heavy-light'
                         SubElement(left_barline, "repeat", direction='forward')
@@ -532,8 +598,7 @@ def convert_tree(tree, meta_tree):
 
                         clefID, handle_tempo = process_gfholds(piano_staff_spec_cmper, meas_spec_cmper, staff_id,
                                                                measure, root, meas_spec,
-                                                               handle_tempo, barline_,
-                                                               bacRepBar, barEnding, ending_cnt,
+                                                               handle_tempo,
                                                                current_beats, current_divbeat, key,
                                                                transp_key_adjust, transp_interval)
                         clefIDs[staff_id] = clefID
@@ -548,8 +613,7 @@ def convert_tree(tree, meta_tree):
                         handle_chords(measure, chords, key, transp_key_adjust, 1)
 
                     clefID, handle_tempo = process_gfholds(staff_spec_cmper, meas_spec_cmper, None, measure,
-                                                           root, meas_spec, handle_tempo, barline_, bacRepBar,
-                                                           barEnding, ending_cnt, current_beats, current_divbeat, key,
+                                                           root, meas_spec, handle_tempo, current_beats, current_divbeat, key,
                                                            transp_key_adjust, transp_interval)
                     # todo handle clefListID =(mid-measure clef changes)
                     # todo use <hasExpr/> to determine show time_signature
@@ -557,6 +621,8 @@ def convert_tree(tree, meta_tree):
                     if clefID != current_clefID:
                         attributes = handle_clef_change(root, measure, attributes, clefID)
                         current_clefID = clefID
+
+                add_right_barline(measure, barline_, bacRepBar, ending_stop)
 
                 if attributes is not None:
                     reorder_children(attributes,
@@ -871,7 +937,7 @@ def add_rest_to_empty_measure(root, measure, meas_spec_cmper, staff_id, beats=No
 
 
 def process_gfholds(staff_spec_cmper, meas_spec_cmper, staff_id, measure, root, meas_spec,
-                    handle_tempo, barline_, bacRepBar, barEnding, ending_cnt, current_beats,
+                    handle_tempo, current_beats,
                     current_divbeat, key, transp_key_adjust, transp_interval):
     clefID = None
     gfholds = root.xpath(
@@ -963,7 +1029,7 @@ def process_gfholds(staff_spec_cmper, meas_spec_cmper, staff_id, measure, root, 
                 words = SubElement(direction_type, 'words')
                 words.text = clean_words(expression['text'])
                 words.set('font-style', 'italic')
-            elif expression['categoryType'] == 'tempoMarks':
+            elif expression['categoryType'] == 'tempoMarks' and staff_id in (None, 1):
                 words, beat_unit, has_dot, per_minute, parentheses = translate_tempo_marks(expression['text'])
                 # MusicXML order inside <direction>: direction-type+, offset?, staff?, sound?
                 direction = Element("direction", placement=placement)
@@ -987,11 +1053,15 @@ def process_gfholds(staff_spec_cmper, meas_spec_cmper, staff_id, measure, root, 
                         SubElement(direction, "sound", tempo=tempo)
                 elif tempo:
                     SubElement(measure, "sound", tempo=tempo)
-            elif expression['categoryType'] == 'rehearsalMarks':
-                # if not '^rehearsal()' in expression['text'] and not 'Rehearsal' in expression['descStr']:
-                #     print(meas_spec_cmper, 'rehearsalMarks', expression)
-                # todo rehearsal letters
-                pass
+            elif expression['categoryType'] == 'rehearsalMarks' and staff_id in (None, 1):
+                label, enclosure = rehearsal_label(root, meas_spec_cmper, expression)
+                if label:
+                    direction = SubElement(measure, "direction", placement='above')
+                    direction_type = SubElement(direction, "direction-type")
+                    rehearsal = SubElement(direction_type, "rehearsal")
+                    rehearsal.text = label
+                    if enclosure:
+                        rehearsal.set('enclosure', enclosure)
 
             # Tempo changes carried by any other category (e.g. "a Tempo", "Andantino" filed elsewhere)
             if (expression['categoryType'] != 'tempoMarks' and expression['playType'] == 'time'
@@ -1032,17 +1102,49 @@ def process_gfholds(staff_spec_cmper, meas_spec_cmper, staff_id, measure, root, 
                               transp_interval)
                 has_prev_frame = True
 
+    return clefID, handle_tempo
+
+
+def add_right_barline(measure, barline_, bacRepBar, ending_stop):
+    # Written once per measure, after every staff of a grand-staff part
     barline = SubElement(measure, "barline", location="right")
     bar_style = SubElement(barline, "bar-style")
-    bar_style.text = translate_bar_style(barline_, bacRepBar, barEnding)
-    if barEnding:
-        SubElement(barline, "ending", number=str(ending_cnt), type='stop').text = f'{ending_cnt}.'
-    else:
-        ending_cnt = 0
+    bar_style.text = translate_bar_style(barline_, bacRepBar, ending_stop is not None)
+    if ending_stop:
+        number, stop_type = ending_stop
+        SubElement(barline, "ending", number=number, type=stop_type)
     if bacRepBar:
         SubElement(barline, "repeat", direction='backward', winged='none')
 
-    return clefID, handle_tempo
+
+def lookup_endings(root):
+    """Volta brackets from Finale's repeatEndingStart (start measure), repeatPassList (ending
+    numbers) and repeatBack (backward repeat that closes the bracket).
+    Returns {'start': {meas: '1,2'}, 'stop': {meas: ('1,2', 'stop'|'discontinue')}}."""
+    starts = {}
+    for e in root.xpath("/f:finale/f:others/f:repeatEndingStart[not(@part)]", namespaces=ns):
+        nxt = e.find("f:nextEnd", namespaces=ns)
+        starts[int(e.get("cmper"))] = int(nxt.text) if nxt is not None and nxt.text else None
+    passes = {}
+    for e in root.xpath("/f:finale/f:others/f:repeatPassList[not(@part)]", namespaces=ns):
+        passes.setdefault(int(e.get("cmper")), []).extend(
+            a.text for a in e.findall("f:act", namespaces=ns) if a.text)
+    backs = sorted(int(e.get("cmper")) for e in
+                   root.xpath("/f:finale/f:others/f:repeatBack[not(@part)]", namespaces=ns))
+    result = {'start': {}, 'stop': {}}
+    for i, start in enumerate(sorted(starts)):
+        number = ','.join(passes.get(start) or [str(i + 1)])
+        limit = starts[start]
+        back = next((b for b in backs if b >= start and (limit is None or b < limit)), None)
+        if back is not None:
+            stop, stop_type = back, 'stop'
+        elif limit is not None:
+            stop, stop_type = limit - 1, 'discontinue'
+        else:
+            stop, stop_type = start, 'discontinue'
+        result['start'][str(start)] = number
+        result['stop'][str(stop)] = (number, stop_type)
+    return result
 
 
 NOTE_ORDER = ["grace", "chord", "pitch", "unpitched", "rest", "cue", "duration", "tie", "instrument",
