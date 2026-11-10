@@ -89,8 +89,8 @@ ENGRAVER_CHAR_MAP_CLEFS = {
     57427: ('G', 1),
     57428: ('G', 2),
     57429: ('G', -1),
-    57430: ('G', 0),
-    57431: ('G', 0),
+    57430: ('G', -1),  # U+E056 gClef8vbCClef (tenor voice)
+    57431: ('G', -1),  # U+E057 gClef8vbParens (optional 8vb)
     57432: ('G', 0),
     57433: ('G', 0),
     57434: ('G', 0),

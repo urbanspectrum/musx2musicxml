@@ -273,20 +273,20 @@ def lookup_suffix(root, suffix_cmper):
 
 # SMuFL chord-symbol glyphs (Finale 26+ fonts) as the plain text the chord patterns understand
 SMUFL_CHORD_SYMBOLS = str.maketrans({
-    "": "°",  # csymDiminished
-    "": "ø",  # csymHalfDiminished
-    "": "+",  # csymAugmented
-    "": "Δ",  # csymMajorSeventh
-    "": "-",  # csymMinor
-    "": "(", "": ")",  # csymParensLeftTall / RightTall
-    "": "[", "": "]",  # csymBracketLeftTall / RightTall
-    "": "(", "": ")",  # csymParensLeftVeryTall / RightVeryTall
-    "": "(", "": ")",  # csymBracketLeftVeryTall / RightVeryTall (approximated)
-    "": "b",  # accidentalFlat
-    "": "",   # accidentalNatural
-    "": "#",  # accidentalSharp
-    "": "##",  # accidentalDoubleSharp
-    "": "bb",  # accidentalDoubleFlat
+    "\ue870": "°",  # csymDiminished
+    "\ue871": "ø",  # csymHalfDiminished
+    "\ue872": "+",  # csymAugmented
+    "\ue873": "Δ",  # csymMajorSeventh
+    "\ue874": "-",  # csymMinor
+    "\ue875": "(", "\ue876": ")",  # csymParensLeftTall / RightTall
+    "\ue877": "[", "\ue878": "]",  # csymBracketLeftTall / RightTall
+    "\ue879": "(", "\ue87a": ")",  # csymParensLeftVeryTall / RightVeryTall
+    "\ue87b": "(", "\ue87c": ")",  # csymBracketLeftVeryTall / RightVeryTall (approximated)
+    "\ue260": "b",  # accidentalFlat
+    "\ue261": "",   # accidentalNatural
+    "\ue262": "#",  # accidentalSharp
+    "\ue263": "##",  # accidentalDoubleSharp
+    "\ue264": "bb",  # accidentalDoubleFlat
 })
 
 
@@ -471,18 +471,19 @@ def convert_tree(tree, meta_tree):
                     if (txt_repeat['topStaffOnly'] and staff_spec_cmper == '1') or txt_repeat[
                         'staffList'] == staff_spec_cmper:
                         # todo horzPos vertPos (EVPU 288 per inch) relative-x relative-y (tenth of a staff space)
-                        if txt_repeat['rptText'] == '%':
+                        rpt_text = (txt_repeat['rptText'] or '').strip()
+                        if rpt_text in ('%', '\ue047', '\ue049'):  # segno (Maestro, SMuFL segno, segnoSerpent1)
                             direction = SubElement(measure, "direction", placement='above')
                             direction_type = SubElement(direction, "direction-type")
                             SubElement(direction_type, "segno")
-                        elif txt_repeat['rptText'] == 'Þ':
+                        elif rpt_text in ('Þ', '\ue048', '\ue04a'):  # coda (Maestro, SMuFL coda, codaSquare)
                             direction = SubElement(measure, "direction", placement='above')
                             direction_type = SubElement(direction, "direction-type")
                             SubElement(direction_type, "coda")
                         else:
                             direction = SubElement(measure, "direction", placement='below')
                             direction_type = SubElement(direction, "direction-type")
-                            SubElement(direction_type, "words").text = txt_repeat['rptText']
+                            SubElement(direction_type, "words").text = clean_words(txt_repeat['rptText'] or '')
 
                 for meas_smart_shape in meas_smart_shapes:
                     if meas_smart_shape['shapeType'] == 'cresc':
