@@ -1,4 +1,4 @@
-# musx2musicxml 1.0
+# musx2musicxml 1.0.1
 
 Turns **Finale files (.musx)** into **MusicXML (.mxl)**, so the music opens in Dorico, MuseScore, Sibelius
 and other notation programs. You do not need Finale installed.
@@ -20,7 +20,7 @@ You do this once, and it takes about ten minutes.
 
 ### 2. Download this converter
 
-- On this GitHub page, click **Releases** (right-hand side), then **musx2musicxml-1.0.0.zip**.
+- On this GitHub page, click **Releases** (right-hand side), then **musx2musicxml-1.0.1.zip**.
 - Leave the zip file in your Downloads folder. You do not need to unzip it.
 
 ### 3. Install the converter
@@ -66,7 +66,7 @@ playback tempo, rehearsal marks, repeat barlines, 1st/2nd endings, chord symbols
 **Handled by the converter but not yet counted by our tests:** notes and rests themselves, ties, key and time
 signatures, clefs, lyrics. Check these by eye.
 
-**Not yet:** 8va / 8vb lines, D.S. / D.C. / segno / coda / fine, slurs were not tested (no sample had them),
+**Not yet:** 8va / 8vb lines; D.S. / D.C. / To Coda / Fine print as text but do not set playback jumps; slurs were not tested (no sample had them),
 glissandos, slash / rhythm notation, cue notes, and exact page layout (where systems and pages break).
 After import, the notation program lays the music out its own way.
 
@@ -82,6 +82,12 @@ measure number. That is exactly the feedback that gets it fixed.
 - Right-hand barlines and repeats are written once per measure on grand staves.
 - Auto-sequencing rehearsal marks (A, B, C ... / 1, 2, 3 ... / measure numbers) are converted.
 - Packaging: installs as `musx2musicxml`, and `lxml` is no longer pinned to an old version that would not install on current Python.
+
+### 1.0.1
+
+- Segno and coda signs (Finale 26+ fonts) come through as real segno / coda marks, not an unreadable character.
+- Stroke-shaped staccatissimo is written as MusicXML spiccato. The wedge and the dot stay staccatissimo.
+- Tenor-voice treble clefs (the treble clef with an 8 below) now sound an octave lower, as written.
 
 ---
 
