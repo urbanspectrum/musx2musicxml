@@ -533,7 +533,7 @@ SMUFL_ARTICULATIONS = {}
 for _cp, _tags in [
     (0xE4A0, ['accent']), (0xE4A2, ['staccato']), (0xE4A4, ['tenuto']), (0xE4A6, ['staccatissimo']),
     (0xE4A8, ['staccatissimo']),  # wedge
-    (0xE4AA, ['staccatissimo']),  # stroke
+    (0xE4AA, ['spiccato']),  # stroke (MusicXML: staccatissimo = wedge, spiccato = stroke)
     (0xE4AC, ['strong-accent']), (0xE4AE, ['strong-accent', 'staccato']), (0xE4B0, ['accent', 'staccato']),
     (0xE4B2, ['detached-legato']), (0xE4B4, ['accent', 'tenuto']), (0xE4B6, ['stress']),
     (0xE4B8, ['unstress']), (0xE4BC, ['strong-accent', 'tenuto']),
