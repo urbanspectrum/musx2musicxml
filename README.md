@@ -1,4 +1,4 @@
-# musx2musicxml 1.0.1
+# musx2musicxml 1.0.2
 
 Turns **Finale files (.musx)** into **MusicXML (.mxl)**, so the music opens in Dorico, MuseScore, Sibelius
 and other notation programs. You do not need Finale installed.
@@ -20,7 +20,7 @@ You do this once, and it takes about ten minutes.
 
 ### 2. Download this converter
 
-- On this GitHub page, click **Releases** (right-hand side), then **musx2musicxml-1.0.1.zip**.
+- On this GitHub page, click **Releases** (right-hand side), then **musx2musicxml-1.0.2.zip**.
 - Leave the zip file in your Downloads folder. You do not need to unzip it.
 
 ### 3. Install the converter
@@ -60,14 +60,14 @@ Every `.musx` in that folder, and in the folders inside it, gets an `.mxl` next 
 We tested this against real Finale 27 charts, measure by measure, counting every mark in Finale and in the MusicXML.
 
 **Converts, checked by count on the test charts:** measures (no overfull bars), tuplets (triplets etc.),
-grace notes, articulations (staccato, accent, tenuto, marcato ...), dynamics, hairpins, tempo marks with
+grace notes, articulations (staccato, accent, tenuto, marcato ...), dynamics, hairpins, bracket lines, glissandos, tempo marks with
 playback tempo, rehearsal marks, repeat barlines, 1st/2nd endings, chord symbols, grand-staff (piano) parts.
 
 **Handled by the converter but not yet counted by our tests:** notes and rests themselves, ties, key and time
 signatures, clefs, lyrics. Check these by eye.
 
 **Not yet:** 8va / 8vb lines; D.S. / D.C. / To Coda / Fine print as text but do not set playback jumps; slurs were not tested (no sample had them),
-glissandos, slash / rhythm notation, cue notes, and exact page layout (where systems and pages break).
+slash / rhythm notation, cue notes, and exact page layout (where systems and pages break).
 After import, the notation program lays the music out its own way.
 
 **Please check every piece by eye after converting.** If something looks wrong, note the piece name and the
@@ -88,6 +88,13 @@ measure number. That is exactly the feedback that gets it fixed.
 - Segno and coda signs (Finale 26+ fonts) come through as real segno / coda marks, not an unreadable character.
 - Stroke-shaped staccatissimo is written as MusicXML spiccato. The wedge and the dot stay staccatissimo.
 - Tenor-voice treble clefs (the treble clef with an 8 below) now sound an octave lower, as written.
+
+### 1.0.2
+
+- Bracket lines and plain lines (solid or dashed, with or without hooks) are converted. They used to be dropped.
+- Glissandos are converted, from the first note to the last.
+- Hairpins on a piano's lower staff are kept, on the lower staff. They used to be dropped.
+- Hairpins attached to a note start and stop at that note, not at the start of the bar.
 
 ---
 

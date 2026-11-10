@@ -239,7 +239,7 @@ def lookup_meas_smart_shapes(root, meas_spec_cmper):
             endEdu = smartShape.find("f:endTermSeg/f:endPt/f:edu", namespaces=ns).text if smartShape.find(
                 "f:endTermSeg/f:endPt/f:edu", namespaces=ns) is not None else None
             meas_smart_shapes.append(
-                {'shapeType': shapeType, 'startMeas': startMeas, 'startEntry': startEntry, 'startInst': startInst,
+                {'cmper': smartShape.get('cmper'), 'shapeType': shapeType, 'startMeas': startMeas, 'startEntry': startEntry, 'startInst': startInst,
                  'endMeas': endMeas, 'startEdu': startEdu, 'endEntry': endEntry, 'endInst': endInst, 'endEdu': endEdu})
     return meas_smart_shapes
 
@@ -485,67 +485,15 @@ def convert_tree(tree, meta_tree):
                             direction_type = SubElement(direction, "direction-type")
                             SubElement(direction_type, "words").text = clean_words(txt_repeat['rptText'] or '')
 
+                # staves of this part a smart shape can sit on -> <staff> number (None for single-staff parts)
+                if piano_staff_group:
+                    shape_staffs = {s.get('cmper'): i + 1 for i, s in enumerate(
+                        s for s in staff_specs if int(piano_staff_group['startInst']) <= int(s.get('cmper'))
+                        <= int(piano_staff_group['endInst']))}
+                else:
+                    shape_staffs = {staff_spec_cmper: None}
                 for meas_smart_shape in meas_smart_shapes:
-                    if meas_smart_shape['shapeType'] == 'cresc':
-                        if meas_smart_shape['startMeas'] == meas_spec_cmper and meas_smart_shape[
-                            'startInst'] == staff_spec_cmper:
-
-                            direction = SubElement(measure, "direction", placement='below')
-                            direction_type = SubElement(direction, "direction-type")
-                            if meas_smart_shape['startEdu']:
-                                SubElement(direction, "offset").text = str(
-                                    math.ceil((int(meas_smart_shape['startEdu']) * DIVISIONS) / 1024))
-                            SubElement(direction_type, "wedge", type="crescendo")
-                        if meas_smart_shape['endMeas'] == meas_spec_cmper and meas_smart_shape[
-                            'startInst'] == staff_spec_cmper:
-
-                            direction = SubElement(measure, "direction", placement='below')
-                            direction_type = SubElement(direction, "direction-type")
-                            if meas_smart_shape['endEdu']:
-                                SubElement(direction, "offset").text = str(
-                                    math.ceil((int(meas_smart_shape['endEdu']) * DIVISIONS) / 1024))
-                            # if staff_id:
-                            #     SubElement(direction, "staff").text = str(staff_id)
-                            SubElement(direction_type, "wedge", type="stop")
-                    elif meas_smart_shape['shapeType'] == 'decresc':
-                        if meas_smart_shape['startMeas'] == meas_spec_cmper and meas_smart_shape[
-                            'endInst'] == staff_spec_cmper:
-
-                            direction = SubElement(measure, "direction", placement='below')
-                            direction_type = SubElement(direction, "direction-type")
-                            if meas_smart_shape['startEdu']:
-                                SubElement(direction, "offset").text = str(
-                                    math.ceil((int(meas_smart_shape['startEdu']) * DIVISIONS) / 1024))
-                            SubElement(direction_type, "wedge", type="diminuendo")
-
-                        if meas_smart_shape['endMeas'] == meas_spec_cmper and meas_smart_shape[
-                            'endInst'] == staff_spec_cmper:
-
-                            direction = SubElement(measure, "direction", placement='below')
-                            direction_type = SubElement(direction, "direction-type")
-                            if meas_smart_shape['endEdu']:
-                                SubElement(direction, "offset").text = str(
-                                    math.ceil((int(meas_smart_shape['endEdu']) * DIVISIONS) / 1024))
-                            # if staff_id:
-                            #     SubElement(direction, "staff").text = str(staff_id)
-                            SubElement(direction_type, "wedge", type="stop")
-                    elif meas_smart_shape['shapeType'] == 'octaveUp':
-                        pass
-                    elif meas_smart_shape['shapeType'] == 'octaveDown':
-                        pass
-                    elif meas_smart_shape['shapeType'] == 'slurUp':
-                        pass
-                    elif meas_smart_shape['shapeType'] == 'trill':
-                        pass
-                    elif meas_smart_shape['shapeType'] == 'smartLine':
-                        pass
-                    elif meas_smart_shape['shapeType'] == 'dashLine':
-                        pass
-                    elif meas_smart_shape['shapeType'] == 'trillExt':
-                        pass
-                    elif meas_smart_shape['shapeType'] == 'solidLine':
-                        pass
-                    else:
+                    if not add_measure_smart_shape(measure, meas_smart_shape, meas_spec_cmper, shape_staffs):
                         if meas_smart_shape['startEntry'] is None:
                             if VERBOSE: print(meas_smart_shape)
 
@@ -623,6 +571,7 @@ def convert_tree(tree, meta_tree):
                         attributes = handle_clef_change(root, measure, attributes, clefID)
                         current_clefID = clefID
 
+                place_entry_anchored_directions(measure)
                 add_right_barline(measure, barline_, bacRepBar, ending_stop)
 
                 if attributes is not None:
@@ -822,8 +771,13 @@ def process_frame_entries(root, measure, current_entnum, end_entnum, staff_id, v
         0] if root.xpath(f"/f:finale/f:entries/f:entry[@entnum = '{current_entnum}']", namespaces=ns) else None
     if current_entry is None:
         return
+    first_new = len(measure)
     tuplet_attributes = process_entry(root, measure, current_entry, staff_id, voice, key, transp_key_adjust,
                                       transp_interval, tuplet_attributes)
+    for child in list(measure)[first_new:]:
+        if child.tag == 'note':
+            child.set(ENTRY_ATTR, current_entnum)
+            break
 
     if current_entnum != end_entnum:
         next_entnum = current_entry.get("next")
@@ -881,6 +835,11 @@ def handleSmartShapeDetail(root, entry, notations):
             if shapeType == 'slurAuto' or shapeType == 'slurUp':
                 slur_type = 'start' if startEntry == entnum else 'stop'
                 SubElement(notations, 'slur', number='1', type=slur_type)
+            elif shapeType == 'glissando':
+                gliss_end = smartShape.findtext("f:endTermSeg/f:endPt/f:entryNum", namespaces=ns)
+                gliss_type = 'start' if startEntry == entnum else ('stop' if gliss_end == entnum else None)
+                if gliss_type:
+                    SubElement(notations, 'glissando', number=str(int(shapeNum) % 16 + 1), type=gliss_type)
         else:
             print(f'Smart shape with cmper {shapeNum} not found.')
 
@@ -1104,6 +1063,68 @@ def process_gfholds(staff_spec_cmper, meas_spec_cmper, staff_id, measure, root, 
                 has_prev_frame = True
 
     return clefID, handle_tempo
+
+
+ENTRY_ATTR = '_finale_entnum'  # temporary marker on <note>, removed before output
+ANCHOR_ATTR = '_finale_anchor'  # temporary marker on <direction> anchored to an entry
+
+HAIRPIN_TYPES = {'cresc': 'crescendo', 'decresc': 'diminuendo'}
+# Finale line shapes -> (line-end at start, line-end at stop, line-type). "2" = hook at both ends.
+BRACKET_TYPES = {
+    'solidLine': ('none', 'none', 'solid'), 'dashLine': ('none', 'none', 'dashed'),
+    'solidLineUp': ('none', 'up', 'solid'), 'solidLineDown': ('none', 'down', 'solid'),
+    'dashLineUp': ('none', 'up', 'dashed'), 'dashLineDown': ('none', 'down', 'dashed'),
+    'solidLineUp2': ('up', 'up', 'solid'), 'solidLineDown2': ('down', 'down', 'solid'),
+    'dashLineUp2': ('up', 'up', 'dashed'), 'dashLineDown2': ('down', 'down', 'dashed'),
+}
+
+
+def add_measure_smart_shape(measure, shape, meas_spec_cmper, shape_staffs):
+    """Hairpins and bracket lines that start or stop in this measure. Each end is matched on its own
+    staff (startInst / endInst) and carries <staff> on grand staves. An end anchored to a note
+    (entryNum, no edu) is marked and moved before that note by place_entry_anchored_directions.
+    Returns False for shape types not handled here."""
+    shape_type = shape['shapeType']
+    if shape_type in HAIRPIN_TYPES:
+        tag, placement = 'wedge', 'below'
+        ends = {'start': {'type': HAIRPIN_TYPES[shape_type]}, 'end': {'type': 'stop'}}
+    elif shape_type in BRACKET_TYPES:
+        start_end, stop_end, line_type = BRACKET_TYPES[shape_type]
+        number = str(int(shape['cmper']) % 16 + 1)
+        tag = 'bracket'
+        placement = 'below' if 'up' in (start_end, stop_end) else 'above'
+        ends = {'start': {'type': 'start', 'number': number, 'line-end': start_end, 'line-type': line_type},
+                'end': {'type': 'stop', 'number': number, 'line-end': stop_end}}
+    else:
+        return False
+    for which in ('start', 'end'):
+        inst = shape[which + 'Inst']
+        if shape[which + 'Meas'] != meas_spec_cmper or inst not in shape_staffs:
+            continue
+        direction = SubElement(measure, "direction", placement=placement)
+        direction_type = SubElement(direction, "direction-type")
+        SubElement(direction_type, tag, attrib=ends[which])
+        edu, entry = shape[which + 'Edu'], shape[which + 'Entry']
+        if edu:
+            SubElement(direction, "offset").text = str(math.ceil((int(edu) * DIVISIONS) / 1024))
+        elif entry:
+            direction.set(ANCHOR_ATTR, entry)
+        if shape_staffs[inst]:
+            SubElement(direction, "staff").text = str(shape_staffs[inst])
+    return True
+
+
+def place_entry_anchored_directions(measure):
+    """Move directions anchored to a Finale entry to just before that entry's note, so they take
+    the note's position in time; then drop the temporary markers."""
+    notes = {n.get(ENTRY_ATTR): n for n in measure.findall("note") if n.get(ENTRY_ATTR)}
+    for direction in measure.findall("direction"):
+        anchor = direction.attrib.pop(ANCHOR_ATTR, None)
+        if anchor and anchor in notes:
+            measure.remove(direction)
+            measure.insert(list(measure).index(notes[anchor]), direction)
+    for note in notes.values():
+        del note.attrib[ENTRY_ATTR]
 
 
 def add_right_barline(measure, barline_, bacRepBar, ending_stop):
